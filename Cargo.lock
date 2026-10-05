@@ -6835,6 +6835,7 @@ dependencies = [
  "wasmer-package",
  "web-time",
  "webc",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

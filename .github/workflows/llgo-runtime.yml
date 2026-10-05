@@ -1,0 +1,229 @@
+name: LLGo runtime
+on:
+  push:
+    branches: [llgo]
+  pull_request:
+    branches: [llgo]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: llgo-runtime-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  validate:
+    name: Runtime (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            backend: cranelift
+            test-features: singlepass
+            asset: wasmer-linux-amd64
+          - os: ubuntu-24.04-arm
+            backend: cranelift
+            test-features: singlepass
+            asset: wasmer-linux-aarch64
+          - os: macos-15
+            backend: cranelift
+            test-features: singlepass
+            asset: wasmer-darwin-arm64
+          - os: windows-2022
+            backend: v8
+            test-features: v8,wasmer/v8-default
+            cli-features: v8-default
+            asset: wasmer-windows-amd64
+    defaults:
+      run:
+        shell: bash
+    env:
+      CARGO_BUILD_JOBS: "2"
+      CARGO_PROFILE_RELEASE_DEBUG: "0"
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: true
+      - uses: ./.github/actions/load_toolchain
+        id: toolchain
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ steps.toolchain.outputs.rust_toolchain }}
+          components: rustfmt
+          targets: wasm32-wasip1
+      - name: Set up MSVC
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+      - name: Use MSVC linker in Git Bash
+        if: runner.os == 'Windows'
+        run: rm /usr/bin/link.exe
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: llgo-${{ matrix.backend }}
+          cache-on-failure: true
+      - name: Check Rust formatting
+        run: cargo fmt --all -- --check
+      - name: Test filesystems and timestamp persistence
+        run: cargo test -p virtual-fs --release --locked
+      - name: Test WASI runtime and syscall regressions
+        run: >-
+          cargo test -p wasmer-wasix --release --locked --features '${{ matrix.test-features }}' --lib --test timestamp_syscalls --test path_unlink_file
+      - name: Load pinned C toolchain version
+        if: runner.os != 'Windows'
+        run: |
+          source .github/ci-constants.env
+          echo "WASIX_LIBC_SYSROOT_TAG=$WASIX_LIBC_SYSROOT_TAG" >> "$GITHUB_ENV"
+      - name: Install WASIX C toolchain
+        if: runner.os != 'Windows'
+        uses: wasix-org/wasixcc@v0.4.3
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          version: v0.4.3
+          install-sysroot: "false"
+      - name: Install current and compatibility sysroots
+        if: runner.os != 'Windows'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          for tag in "$WASIX_LIBC_SYSROOT_TAG" v2026-05-12.1; do
+            prefix="$HOME/.wasixcc/sysroot"
+            if [[ "$tag" == v2026-05-12.1 ]]; then prefix="$HOME/.wasixcc/sysroot-$tag"; fi
+            for attempt in 1 2 3; do
+              if WASIXCC_SYSROOT_PREFIX="$prefix" wasixccenv download-sysroot "$tag"; then break; fi
+              if [[ "$attempt" == 3 ]]; then exit 1; fi
+              sleep 5
+            done
+          done
+          wasixccenv print-sysroot
+      - name: Test buffered writes, file allocation, and mmap
+        env:
+          BACKEND: ${{ matrix.backend }}
+          TEST_FEATURES: ${{ matrix.test-features }}
+        run: |
+          set -euo pipefail
+          cargo test -p wasmer-wasix --release --locked --features "$TEST_FEATURES" --test wasm_tests -- --list > guest-tests.txt
+          tests=("wasi_wast/fd_allocate/default/wasip1")
+          if [[ "$RUNNER_OS" != Windows ]]; then
+            tests+=("fd/pwrite-and-size/default" "libc/read-after-munmap/default")
+            for op in msync munmap-sync; do
+              for position in start middle end; do
+                tests+=("libc/$op-$position-of-file/default")
+              done
+            done
+          fi
+          for name in "${tests[@]}"; do
+            test="wasm/$name/$BACKEND"
+            grep -Fx "$test: test" guest-tests.txt
+            cargo test -p wasmer-wasix --release --locked --features "$TEST_FEATURES" --test wasm_tests -- --exact "$test"
+          done
+      - name: Build CLI
+        run: cargo build -p wasmer-cli --release --locked --features '${{ matrix.cli-features || matrix.backend }}' --bin wasmer
+      - name: Package and verify CLI
+        env:
+          ASSET: ${{ matrix.asset }}
+        run: |
+          set -euo pipefail
+          suffix=
+          if [[ "$RUNNER_OS" == Windows ]]; then suffix=.exe; fi
+          target/release/wasmer"$suffix" --version
+          mkdir -p dist/package/bin dist/verify
+          cp target/release/wasmer"$suffix" dist/package/bin/
+          cp LICENSE dist/package/
+          git rev-parse HEAD > dist/package/REVISION
+          tar -czf "dist/$ASSET.tar.gz" -C dist/package bin LICENSE REVISION
+          tar -xzf "dist/$ASSET.tar.gz" -C dist/verify
+          cmp target/release/wasmer"$suffix" dist/verify/bin/wasmer"$suffix"
+          dist/verify/bin/wasmer"$suffix" --version
+          python - "$ASSET" <<'PY'
+          import hashlib, pathlib, sys
+          path = pathlib.Path('dist') / (sys.argv[1] + '.tar.gz')
+          digest = hashlib.sha256(path.read_bytes()).hexdigest()
+          path.with_suffix(path.suffix + '.sha256').write_text(digest + '  ' + path.name + '\n')
+          PY
+      - name: Run WASI guest with packaged CLI
+        env:
+          BACKEND: ${{ matrix.backend }}
+        run: |
+          python - <<'PY'
+          import os, pathlib, subprocess, tempfile
+          root = pathlib.Path.cwd()
+          suffix = '.exe' if os.name == 'nt' else ''
+          cli = root / 'dist/verify/bin' / ('wasmer' + suffix)
+          tests = root / 'lib/wasix/tests/wasm_tests'
+          wasm = tests / 'build/wasm/wasi_wast/fd_allocate/default/wasip1' / os.environ['BACKEND'] / 'main'
+          expected = (tests / 'wasi_wast/fd_allocate.stdout').read_text()
+          with tempfile.TemporaryDirectory() as directory:
+              result = subprocess.run([str(cli), 'run', '--volume=' + directory + ':/tmp', str(wasm)], check=True, capture_output=True, text=True)
+          if result.stdout != expected:
+              raise SystemExit('Unexpected fd_allocate output: ' + repr(result.stdout))
+          print(result.stdout, end='')
+          PY
+      - name: Preserve validated packages
+        uses: actions/upload-artifact@v6
+        with:
+          name: ${{ matrix.asset }}
+          path: |
+            dist/*.tar.gz
+            dist/*.sha256
+          if-no-files-found: error
+  riscv64:
+    name: Runtime (Linux RISC-V)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      CARGO_BUILD_JOBS: "2"
+      CARGO_PROFILE_RELEASE_DEBUG: "0"
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: true
+      - uses: actions/cache@v5
+        with:
+          path: |
+            target/riscv64gc-unknown-linux-gnu
+            .cargo-riscv
+          key: llgo-riscv64-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', '.github/cross-linux-riscv64/**') }}
+      - name: Build upstream RISC-V cross image
+        run: docker build -t wasmer/llgo-riscv64 .github/cross-linux-riscv64
+      - name: Test and package RISC-V CLI
+        run: |
+          docker run --rm -i -v "$GITHUB_WORKSPACE:/project" -w /project \
+            -e CARGO_BUILD_JOBS -e CARGO_PROFILE_RELEASE_DEBUG -e CARGO_INCREMENTAL \
+            wasmer/llgo-riscv64 bash -s <<'SCRIPT'
+              set -euo pipefail
+              apt-get install --assume-yes --no-install-recommends git python3 qemu-user
+              git config --global --add safe.directory /project
+              export CARGO_HOME=/project/.cargo-riscv
+              export RUST_LOG=off
+              target=riscv64gc-unknown-linux-gnu
+              cargo test -p virtual-fs --release --locked --target "$target" --test timestamps
+              cargo test -p wasmer-wasix --release --locked --target "$target" --features wasmer/cranelift-default --test timestamp_syscalls --test path_unlink_file
+              cargo test -p wasmer-wasix --release --locked --target "$target" --features wasmer/cranelift-default --lib stat_refresh_preserves_buffered_write_size
+              cargo build -p wasmer-cli --release --locked --target "$target" --features cranelift --bin wasmer
+              rustup target add --toolchain 1.96 wasm32-wasip1
+              mkdir -p dist/package-riscv/bin dist/verify-riscv
+              rustc --target wasm32-wasip1 lib/wasix/tests/wasm_tests/wasi_wast/fd_allocate.rs -o dist/fd_allocate.wasm
+              cp "target/$target/release/wasmer" dist/package-riscv/bin/
+              cp LICENSE dist/package-riscv/
+              git rev-parse HEAD > dist/package-riscv/REVISION
+              tar -czf dist/wasmer-linux-riscv64.tar.gz -C dist/package-riscv bin LICENSE REVISION
+              tar -xzf dist/wasmer-linux-riscv64.tar.gz -C dist/verify-riscv
+              cmp "target/$target/release/wasmer" dist/verify-riscv/bin/wasmer
+              qemu-riscv64 -L /usr/riscv64-linux-gnu dist/verify-riscv/bin/wasmer --version
+              qemu-riscv64 -L /usr/riscv64-linux-gnu dist/verify-riscv/bin/wasmer run --volume=/tmp:/tmp dist/fd_allocate.wasm > dist/fd_allocate.stdout
+              cmp lib/wasix/tests/wasm_tests/wasi_wast/fd_allocate.stdout dist/fd_allocate.stdout
+              sha256sum dist/wasmer-linux-riscv64.tar.gz | sed "s|dist/||" > dist/wasmer-linux-riscv64.tar.gz.sha256
+          SCRIPT
+      - name: Preserve validated RISC-V package
+        uses: actions/upload-artifact@v6
+        with:
+          name: wasmer-linux-riscv64
+          path: |
+            dist/wasmer-linux-riscv64.tar.gz
+            dist/wasmer-linux-riscv64.tar.gz.sha256
+          if-no-files-found: error
