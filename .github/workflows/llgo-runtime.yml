@@ -90,14 +90,15 @@ jobs:
         run: |
           set -euo pipefail
           for tag in "$WASIX_LIBC_SYSROOT_TAG" v2026-05-12.1; do
-            prefix="$HOME/.wasixcc"
-            if [[ "$tag" == v2026-05-12.1 ]]; then prefix="$prefix/sysroot-$tag"; fi
+            prefix="$HOME/.wasixcc/sysroot"
+            if [[ "$tag" == v2026-05-12.1 ]]; then prefix="$HOME/.wasixcc/sysroot-$tag"; fi
             for attempt in 1 2 3; do
               if WASIXCC_SYSROOT_PREFIX="$prefix" wasixccenv download-sysroot "$tag"; then break; fi
               if [[ "$attempt" == 3 ]]; then exit 1; fi
               sleep 5
             done
           done
+          wasixccenv print-sysroot
       - name: Test buffered writes, file allocation, and mmap
         env:
           BACKEND: ${{ matrix.backend }}
