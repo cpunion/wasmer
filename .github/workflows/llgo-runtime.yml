@@ -116,7 +116,7 @@ jobs:
           cp target/release/wasmer"$suffix" dist/package/bin/
           cp LICENSE dist/package/
           git rev-parse HEAD > dist/package/REVISION
-          tar -czf "dist/$ASSET.tar.gz" -C dist/package .
+          tar -czf "dist/$ASSET.tar.gz" -C dist/package bin LICENSE REVISION
           tar -xzf "dist/$ASSET.tar.gz" -C dist/verify
           cmp target/release/wasmer"$suffix" dist/verify/bin/wasmer"$suffix"
           dist/verify/bin/wasmer"$suffix" --version
