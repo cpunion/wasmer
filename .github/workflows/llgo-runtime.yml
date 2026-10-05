@@ -33,7 +33,8 @@ jobs:
             asset: wasmer-darwin-arm64
           - os: windows-2022
             backend: v8
-            test-features: v8
+            test-features: v8,wasmer/v8-default
+            cli-features: v8-default
             asset: wasmer-windows-amd64
     defaults:
       run:
@@ -109,7 +110,7 @@ jobs:
             cargo test -p wasmer-wasix --release --locked --features "$TEST_FEATURES" --test wasm_tests -- --exact "$test"
           done
       - name: Build CLI
-        run: cargo build -p wasmer-cli --release --locked --features '${{ matrix.backend }}' --bin wasmer
+        run: cargo build -p wasmer-cli --release --locked --features '${{ matrix.cli-features || matrix.backend }}' --bin wasmer
       - name: Package and verify CLI
         env:
           ASSET: ${{ matrix.asset }}
@@ -131,6 +132,24 @@ jobs:
           path = pathlib.Path('dist') / (sys.argv[1] + '.tar.gz')
           digest = hashlib.sha256(path.read_bytes()).hexdigest()
           path.with_suffix(path.suffix + '.sha256').write_text(digest + '  ' + path.name + '\n')
+          PY
+      - name: Run WASI guest with packaged CLI
+        env:
+          BACKEND: ${{ matrix.backend }}
+        run: |
+          python - <<'PY'
+          import os, pathlib, subprocess, tempfile
+          root = pathlib.Path.cwd()
+          suffix = '.exe' if os.name == 'nt' else ''
+          cli = root / 'dist/verify/bin' / ('wasmer' + suffix)
+          tests = root / 'lib/wasix/tests/wasm_tests'
+          wasm = tests / 'build/wasm/wasi_wast/fd_allocate/default/wasip1' / os.environ['BACKEND'] / 'main'
+          expected = (tests / 'wasi_wast/fd_allocate.stdout').read_text()
+          with tempfile.TemporaryDirectory() as directory:
+              result = subprocess.run([str(cli), 'run', '--volume=' + directory + ':/tmp', str(wasm)], check=True, capture_output=True, text=True)
+          if result.stdout != expected:
+              raise SystemExit('Unexpected fd_allocate output: ' + repr(result.stdout))
+          print(result.stdout, end='')
           PY
       - name: Preserve validated packages
         uses: actions/upload-artifact@v6
