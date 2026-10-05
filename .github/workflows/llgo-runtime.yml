@@ -170,3 +170,60 @@ jobs:
             dist/*.tar.gz
             dist/*.sha256
           if-no-files-found: error
+  riscv64:
+    name: Runtime (Linux RISC-V)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      CARGO_BUILD_JOBS: "2"
+      CARGO_PROFILE_RELEASE_DEBUG: "0"
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: true
+      - uses: actions/cache@v5
+        with:
+          path: |
+            target/riscv64gc-unknown-linux-gnu
+            .cargo-riscv
+          key: llgo-riscv64-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', '.github/cross-linux-riscv64/**') }}
+      - name: Build upstream RISC-V cross image
+        run: docker build -t wasmer/llgo-riscv64 .github/cross-linux-riscv64
+      - name: Test and package RISC-V CLI
+        run: |
+          docker run --rm -i -v "$GITHUB_WORKSPACE:/project" -w /project \
+            -e CARGO_BUILD_JOBS -e CARGO_PROFILE_RELEASE_DEBUG -e CARGO_INCREMENTAL \
+            wasmer/llgo-riscv64 bash -s <<'SCRIPT'
+              set -euo pipefail
+              apt-get install --assume-yes --no-install-recommends git python3 qemu-user
+              git config --global --add safe.directory /project
+              export CARGO_HOME=/project/.cargo-riscv
+              export RUST_LOG=off
+              target=riscv64gc-unknown-linux-gnu
+              cargo test -p virtual-fs --release --locked --target "$target" --test timestamps
+              cargo test -p wasmer-wasix --release --locked --target "$target" --features wasmer/cranelift-default --test timestamp_syscalls --test path_unlink_file
+              cargo test -p wasmer-wasix --release --locked --target "$target" --features wasmer/cranelift-default --lib stat_refresh_preserves_buffered_write_size
+              cargo build -p wasmer-cli --release --locked --target "$target" --features cranelift --bin wasmer
+              rustup target add --toolchain 1.96 wasm32-wasip1
+              mkdir -p dist/package-riscv/bin dist/verify-riscv
+              rustc --target wasm32-wasip1 lib/wasix/tests/wasm_tests/wasi_wast/fd_allocate.rs -o dist/fd_allocate.wasm
+              cp "target/$target/release/wasmer" dist/package-riscv/bin/
+              cp LICENSE dist/package-riscv/
+              git rev-parse HEAD > dist/package-riscv/REVISION
+              tar -czf dist/wasmer-linux-riscv64.tar.gz -C dist/package-riscv bin LICENSE REVISION
+              tar -xzf dist/wasmer-linux-riscv64.tar.gz -C dist/verify-riscv
+              cmp "target/$target/release/wasmer" dist/verify-riscv/bin/wasmer
+              qemu-riscv64 -L /usr/riscv64-linux-gnu dist/verify-riscv/bin/wasmer --version
+              qemu-riscv64 -L /usr/riscv64-linux-gnu dist/verify-riscv/bin/wasmer run --volume=/tmp:/tmp dist/fd_allocate.wasm > dist/fd_allocate.stdout
+              cmp lib/wasix/tests/wasm_tests/wasi_wast/fd_allocate.stdout dist/fd_allocate.stdout
+              sha256sum dist/wasmer-linux-riscv64.tar.gz | sed "s|dist/||" > dist/wasmer-linux-riscv64.tar.gz.sha256
+          SCRIPT
+      - name: Preserve validated RISC-V package
+        uses: actions/upload-artifact@v6
+        with:
+          name: wasmer-linux-riscv64
+          path: |
+            dist/wasmer-linux-riscv64.tar.gz
+            dist/wasmer-linux-riscv64.tar.gz.sha256
+          if-no-files-found: error
