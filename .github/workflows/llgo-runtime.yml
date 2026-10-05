@@ -202,8 +202,8 @@ jobs:
               export RUST_LOG=off
               target=riscv64gc-unknown-linux-gnu
               cargo test -p virtual-fs --release --locked --target "$target" --test timestamps
-              cargo test -p wasmer-wasix --release --locked --target "$target" --features wasmer/cranelift-default --test timestamp_syscalls --test path_unlink_file
-              cargo test -p wasmer-wasix --release --locked --target "$target" --features wasmer/cranelift-default --lib stat_refresh_preserves_buffered_write_size
+              cargo test -p wasmer-wasix --release --locked --target "$target" --features wasmer/cranelift --test timestamp_syscalls --test path_unlink_file
+              cargo test -p wasmer-wasix --release --locked --target "$target" --features wasmer/cranelift --lib stat_refresh_preserves_buffered_write_size
               cargo build -p wasmer-cli --release --locked --target "$target" --features cranelift --bin wasmer
               rustup target add --toolchain 1.96 wasm32-wasip1
               mkdir -p dist/package-riscv/bin dist/verify-riscv
