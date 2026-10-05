@@ -59,6 +59,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: llgo-${{ matrix.backend }}
+          cache-on-failure: true
       - name: Check Rust formatting
         run: cargo fmt --all -- --check
       - name: Test filesystems and timestamp persistence
@@ -68,7 +69,9 @@ jobs:
           cargo test -p wasmer-wasix --release --locked --features '${{ matrix.test-features }}' --lib --test timestamp_syscalls --test path_unlink_file
       - name: Load pinned C toolchain version
         if: runner.os != 'Windows'
-        run: cat .github/ci-constants.env >> "$GITHUB_ENV"
+        run: |
+          source .github/ci-constants.env
+          echo "WASIX_LIBC_SYSROOT_TAG=$WASIX_LIBC_SYSROOT_TAG" >> "$GITHUB_ENV"
       - name: Install WASIX C toolchain
         if: runner.os != 'Windows'
         uses: wasix-org/wasixcc@v0.4.3
