@@ -137,6 +137,28 @@ async fn host_path_and_handle_timestamps_use_nanoseconds_and_survive_reopening()
     );
 }
 
+#[cfg(feature = "host-fs")]
+#[tokio::test]
+async fn readonly_handle_timestamps_follow_the_file_after_path_replacement() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(temp.path().join("file"), "original").unwrap();
+    let fs = virtual_fs::host_fs::FileSystem::new(tokio::runtime::Handle::current(), temp.path())
+        .unwrap();
+    let mut file = fs.new_open_options().read(true).open("/file").unwrap();
+    std::fs::rename(temp.path().join("file"), temp.path().join("moved")).unwrap();
+    std::fs::write(temp.path().join("file"), "replacement").unwrap();
+    let replacement_mtime = fs.metadata(Path::new("/file")).unwrap().modified();
+
+    file.set_times(Some(ATIME), Some(MTIME)).unwrap();
+    let original = fs.metadata(Path::new("/moved")).unwrap();
+    assert_eq!((original.accessed(), original.modified()), (ATIME, MTIME));
+    assert_eq!(
+        fs.metadata(Path::new("/file")).unwrap().modified(),
+        replacement_mtime
+    );
+    assert_eq!(file.last_modified(), MTIME);
+}
+
 #[cfg(all(feature = "host-fs", unix))]
 #[tokio::test]
 async fn host_nofollow_updates_symlink_including_dangling_symlinks() {

@@ -2694,7 +2694,17 @@ impl WasiFs {
             {
                 stat.st_filetype = current.st_filetype;
             }
-            stat.st_size = current.st_size;
+            // Writes update the logical size before Tokio's buffered host I/O
+            // reaches the backing file. Do not overwrite it with a stale size.
+            if !matches!(
+                &*kind,
+                Kind::File {
+                    handle: Some(_),
+                    ..
+                }
+            ) {
+                stat.st_size = current.st_size;
+            }
             stat.st_atim = current.st_atim;
             stat.st_mtim = current.st_mtim;
             stat.st_ctim = current.st_ctim;
@@ -3003,6 +3013,39 @@ mod tests {
 
     use crate::WasiEnvBuilder;
     use crate::bin_factory::{BinaryPackage, BinaryPackageMount, BinaryPackageMounts};
+
+    #[tokio::test]
+    async fn stat_refresh_preserves_buffered_write_size() {
+        let inodes = WasiInodes::new();
+        let fs_backing =
+            WasiFsRoot::from_filesystem(Arc::new(RootFileSystemBuilder::default().build_tmp()));
+        let fs = WasiFs::new_init(fs_backing, &inodes, FS_ROOT_INO).unwrap();
+        let inode = fs
+            .create_inode(
+                &inodes,
+                Kind::File {
+                    handle: Some(Arc::new(RwLock::new(Box::new(
+                        virtual_fs::BufferFile::default(),
+                    )))),
+                    path: PathBuf::from("/buffered"),
+                    fd: None,
+                },
+                false,
+                "buffered".into(),
+            )
+            .unwrap();
+        // fd_write/fd_allocate have acknowledged six bytes, while the host
+        // file still reports zero bytes until its pending I/O is flushed.
+        {
+            let mut stat = inode.stat.write().unwrap();
+            stat.st_filetype = Filetype::RegularFile;
+            stat.st_size = 6;
+            stat.st_mtim = 0;
+        }
+        let stat = fs.stat_for_inode(&inode).unwrap();
+        assert_eq!(stat.st_size, 6);
+        assert_eq!(stat.st_mtim, 1_000_000_000);
+    }
 
     #[tokio::test]
     async fn dup2_preserves_active_stdio_rights() {

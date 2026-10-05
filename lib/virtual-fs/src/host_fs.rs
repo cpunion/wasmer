@@ -501,7 +501,37 @@ impl VirtualFile for File {
         let atime = atime.map(file_time_from_nanos);
         let mtime = mtime.map(file_time_from_nanos);
 
-        filetime::set_file_handle_times(&self.inner_std, atime, mtime).map_err(Into::into)
+        #[cfg(windows)]
+        let file = {
+            use std::os::windows::io::{AsRawHandle, FromRawHandle};
+            use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+            use windows_sys::Win32::Storage::FileSystem::{
+                FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_WRITE_ATTRIBUTES,
+                ReOpenFile,
+            };
+            // A read-only handle lacks FILE_WRITE_ATTRIBUTES. Reopen the same
+            // object rather than its path, which may have been replaced.
+            // SAFETY: inner_std owns a valid file handle for this call.
+            let handle = unsafe {
+                ReOpenFile(
+                    self.inner_std.as_raw_handle(),
+                    FILE_WRITE_ATTRIBUTES,
+                    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                    0,
+                )
+            };
+            if handle == INVALID_HANDLE_VALUE {
+                return Err(io::Error::last_os_error().into());
+            }
+            // SAFETY: ReOpenFile returned a new owned handle; File closes it.
+            unsafe { fs::File::from_raw_handle(handle) }
+        };
+        #[cfg(windows)]
+        let file = &file;
+        #[cfg(not(windows))]
+        let file = &self.inner_std;
+
+        filetime::set_file_handle_times(file, atime, mtime).map_err(Into::into)
     }
 
     fn size(&self) -> u64 {

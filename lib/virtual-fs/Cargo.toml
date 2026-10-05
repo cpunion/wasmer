@@ -49,9 +49,16 @@ tokio = { workspace = true, features = [
   "rt",
 ], default-features = false }
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, optional = true, features = [
+  "Win32_Foundation",
+  "Win32_Storage_FileSystem",
+] }
+
 [features]
 default = ["host-fs", "webc-fs"]
 host-fs = [
+  "dep:windows-sys",
   "libc",
   "fs_extra",
   "filetime",

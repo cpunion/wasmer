@@ -1,0 +1,133 @@
+name: LLGo runtime
+on:
+  push:
+    branches: [llgo]
+  pull_request:
+    branches: [llgo]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: llgo-runtime-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  validate:
+    name: Runtime (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            backend: cranelift
+            test-features: singlepass
+            asset: wasmer-linux-amd64
+          - os: ubuntu-24.04-arm
+            backend: cranelift
+            test-features: singlepass
+            asset: wasmer-linux-aarch64
+          - os: macos-15
+            backend: cranelift
+            test-features: singlepass
+            asset: wasmer-darwin-arm64
+          - os: windows-2022
+            backend: v8
+            test-features: v8
+            asset: wasmer-windows-amd64
+    defaults:
+      run:
+        shell: bash
+    env:
+      CARGO_BUILD_JOBS: "2"
+      CARGO_PROFILE_RELEASE_DEBUG: "0"
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: true
+      - uses: dtolnay/rust-toolchain@1.96.0
+        with:
+          components: rustfmt
+          targets: wasm32-wasip1
+      - name: Set up MSVC
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: llgo-${{ matrix.backend }}
+      - name: Check Rust formatting
+        run: cargo fmt --all -- --check
+      - name: Test filesystems and timestamp persistence
+        run: cargo test -p virtual-fs --release --locked
+      - name: Test WASI runtime and syscall regressions
+        run: >-
+          cargo test -p wasmer-wasix --release --locked --features '${{ matrix.test-features }}' --lib --test timestamp_syscalls --test path_unlink_file
+      - name: Load pinned C toolchain version
+        if: runner.os != 'Windows'
+        run: cat .github/ci-constants.env >> "$GITHUB_ENV"
+      - name: Install WASIX C toolchain
+        if: runner.os != 'Windows'
+        uses: wasix-org/wasixcc@v0.4.3
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          version: v0.4.3
+          sysroot-tag: ${{ env.WASIX_LIBC_SYSROOT_TAG }}
+      - name: Install compatibility sysroot
+        if: runner.os != 'Windows'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: WASIXCC_SYSROOT_PREFIX=~/.wasixcc/sysroot-v2026-05-12.1 wasixccenv download-sysroot v2026-05-12.1
+      - name: Test buffered writes, file allocation, and mmap
+        env:
+          BACKEND: ${{ matrix.backend }}
+          TEST_FEATURES: ${{ matrix.test-features }}
+        run: |
+          set -euo pipefail
+          cargo test -p wasmer-wasix --release --locked --features "$TEST_FEATURES" --test wasm_tests -- --list > guest-tests.txt
+          tests=("wasi_wast/fd_allocate/default/wasip1")
+          if [[ "$RUNNER_OS" != Windows ]]; then
+            tests+=("fd/pwrite-and-size/default" "libc/read-after-munmap/default")
+            for op in msync munmap-sync; do
+              for position in start middle end; do
+                tests+=("libc/$op-$position-of-file/default")
+              done
+            done
+          fi
+          for name in "${tests[@]}"; do
+            test="wasm/$name/$BACKEND"
+            grep -Fx "$test: test" guest-tests.txt
+            cargo test -p wasmer-wasix --release --locked --features "$TEST_FEATURES" --test wasm_tests -- --exact "$test"
+          done
+      - name: Build CLI
+        run: cargo build -p wasmer-cli --release --locked --features '${{ matrix.backend }}' --bin wasmer
+      - name: Package and verify CLI
+        env:
+          ASSET: ${{ matrix.asset }}
+        run: |
+          set -euo pipefail
+          suffix=
+          if [[ "$RUNNER_OS" == Windows ]]; then suffix=.exe; fi
+          target/release/wasmer"$suffix" --version
+          mkdir -p dist/package/bin dist/verify
+          cp target/release/wasmer"$suffix" dist/package/bin/
+          cp LICENSE dist/package/
+          git rev-parse HEAD > dist/package/REVISION
+          tar -czf "dist/$ASSET.tar.gz" -C dist/package .
+          tar -xzf "dist/$ASSET.tar.gz" -C dist/verify
+          cmp target/release/wasmer"$suffix" dist/verify/bin/wasmer"$suffix"
+          dist/verify/bin/wasmer"$suffix" --version
+          python - "$ASSET" <<'PY'
+          import hashlib, pathlib, sys
+          path = pathlib.Path('dist') / (sys.argv[1] + '.tar.gz')
+          digest = hashlib.sha256(path.read_bytes()).hexdigest()
+          path.with_suffix(path.suffix + '.sha256').write_text(digest + '  ' + path.name + '\n')
+          PY
+      - name: Preserve validated packages
+        uses: actions/upload-artifact@v6
+        with:
+          name: ${{ matrix.asset }}
+          path: |
+            dist/*.tar.gz
+            dist/*.sha256
+          if-no-files-found: error

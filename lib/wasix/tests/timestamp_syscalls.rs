@@ -1,5 +1,5 @@
-//! Run with `cargo test -p wasmer-wasix --test timestamp_syscalls --features singlepass`.
-#![cfg(all(feature = "sys", feature = "singlepass"))]
+//! Run with an enabled native compiler backend.
+#![cfg(all(feature = "sys", not(target_family = "wasm")))]
 
 use std::{path::Path, sync::Arc};
 use virtual_fs::{FileSystem, TmpFileSystem};
