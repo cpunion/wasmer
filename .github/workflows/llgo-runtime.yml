@@ -82,12 +82,22 @@ jobs:
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           version: v0.4.3
-          sysroot-tag: ${{ env.WASIX_LIBC_SYSROOT_TAG }}
-      - name: Install compatibility sysroot
+          install-sysroot: "false"
+      - name: Install current and compatibility sysroots
         if: runner.os != 'Windows'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: WASIXCC_SYSROOT_PREFIX=~/.wasixcc/sysroot-v2026-05-12.1 wasixccenv download-sysroot v2026-05-12.1
+        run: |
+          set -euo pipefail
+          for tag in "$WASIX_LIBC_SYSROOT_TAG" v2026-05-12.1; do
+            prefix="$HOME/.wasixcc"
+            if [[ "$tag" == v2026-05-12.1 ]]; then prefix="$prefix/sysroot-$tag"; fi
+            for attempt in 1 2 3; do
+              if WASIXCC_SYSROOT_PREFIX="$prefix" wasixccenv download-sysroot "$tag"; then break; fi
+              if [[ "$attempt" == 3 ]]; then exit 1; fi
+              sleep 5
+            done
+          done
       - name: Test buffered writes, file allocation, and mmap
         env:
           BACKEND: ${{ matrix.backend }}
