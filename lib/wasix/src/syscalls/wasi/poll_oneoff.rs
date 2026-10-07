@@ -290,7 +290,7 @@ where
                         continue;
                     }
 
-                    // A zero timeout is a ready clock event, not an infinite wait.
+                    // Zero is already due; retain the existing 1 ns fast path.
                     if clock_info.timeout <= 1 {
                         time_to_sleep = Duration::ZERO;
                         clock_subs.push((clock_info, s.userdata));
